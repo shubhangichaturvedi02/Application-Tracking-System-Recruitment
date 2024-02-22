@@ -1,7 +1,8 @@
 from rest_framework import generics
 from .models import Candidate
 from .serializers import CandidateSerializer
-from django.db.models import Q
+from django.db.models import Q, Case, When, Value, IntegerField, Sum
+from django.db.models.functions import Length
 
 
 
@@ -43,21 +44,42 @@ class CandidateSearchListView(generics.ListAPIView):
         return queryset.filter(**{k: v for k, v in filters.items() if v is not None})
     
 
-
+    
 class CandidateSearchNameView(generics.ListAPIView):
     serializer_class = CandidateSerializer
 
     def get_queryset(self):
         query = self.request.query_params.get('q', '')
-        candidates = Candidate.objects.all().values()
-        sorted_candidates = self.get_sorted_candidates(query, candidates)
-        return sorted_candidates
 
-    def get_sorted_candidates(self, query, candidates):
+        # Split query into individual words
         query_parts = query.split()
-        sorted_candidates = sorted(candidates, key=lambda candidate: (
-            candidate['name'] == query,  # Exact match
-            sum(part in candidate['name'] for part in query_parts),  # Number of overlapping words
-            candidate['name']  # Alphabetical order for tie-breakers
-        ), reverse=True)
-        return sorted_candidates
+
+        # Construct query for exact matches
+        exact_match_query = Q(name__iexact=query)
+
+        # Construct query for partial matches based on overlapping words
+        partial_match_queries = [
+            Q(name__icontains=part)
+            for part in query_parts
+        ]
+
+        # Query database for candidates
+        queryset = Candidate.objects.annotate(
+            exact_match=Case(
+                When(name__iexact=query, then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField()
+            ),
+            num_matches=Sum(
+                Case(
+                    *[When(name__icontains=part, then=Value(1)) for part in query_parts],
+                    default=Value(0),
+                    output_field=IntegerField()
+                )
+            )
+        ).filter(Q(exact_match=1) | Q(num_matches__gt=0)).order_by(
+            '-exact_match',       # Exact matches first
+            '-num_matches'     # More overlapping words first for partial matches
+        )
+
+        return queryset
